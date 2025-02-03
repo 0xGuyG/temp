@@ -1,0 +1,179 @@
+# Script for Incident Response System Information Collection
+# Create a timestamp for the collection
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$computerName = $env:COMPUTERNAME
+$collectorName = $env:USERNAME
+
+# Create a dedicated output directory
+$outputDir = Join-Path -Path (Get-Location) -ChildPath "IR_Collection_${computerName}_${timestamp}"
+New-Item -ItemType Directory -Force -Path $outputDir
+
+# Initialize transcript logging
+Start-Transcript -Path (Join-Path -Path $outputDir -ChildPath "IR_Collection_Transcript.txt")
+
+Write-Host "[+] Starting Incident Response Collection at $timestamp"
+Write-Host "[+] Collection performed by $collectorName on $computerName"
+
+# Function for error handling and logging
+function Get-IRData {
+    param (
+        [string]$Component,
+        [scriptblock]$Collection
+    )
+    try {
+        Write-Host "[+] Collecting $Component..."
+        & $Collection
+    }
+    catch {
+        Write-Host "[-] Error collecting $Component: $_" -ForegroundColor Red
+        return $null
+    }
+}
+
+# Collect System State Information
+$systemState = @{
+    # Basic System Information
+    ComputerSystem = Get-IRData -Component "Computer System" -Collection {
+        Get-WmiObject -Class Win32_ComputerSystem | Select-Object Manufacturer, Model, TotalPhysicalMemory, 
+        NumberOfLogicalProcessors, Domain, DNSHostName, Username
+    }
+
+    # Operating System Details
+    OperatingSystem = Get-IRData -Component "Operating System" -Collection {
+        Get-WmiObject -Class Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber, 
+        OSArchitecture, InstallDate, LastBootUpTime, LocalDateTime, RegisteredUser, SystemDirectory
+    }
+
+    # Network Configuration
+    NetworkConfiguration = Get-IRData -Component "Network Configuration" -Collection {
+        Get-NetIPConfiguration -Detailed | Select-Object *
+        Get-NetTCPConnection | Where-Object { $_.State -eq 'Established' }
+    }
+
+    # Security Configuration
+    SecurityConfiguration = Get-IRData -Component "Security Configuration" -Collection {
+        # Security Policy
+        secedit /export /cfg "$outputDir\secpol.cfg"
+        # Firewall Rules
+        Get-NetFirewallRule | Where-Object { $_.Enabled -eq 'True' }
+        # Antivirus Status
+        Get-WmiObject -Namespace root\SecurityCenter2 -Class AntiVirusProduct
+    }
+
+    # User Activity
+    UserActivity = Get-IRData -Component "User Activity" -Collection {
+        # Local Users and Groups
+        Get-LocalUser | Select-Object Name, Enabled, LastLogon, PasswordLastSet
+        Get-LocalGroup | Select-Object Name, Description
+        # User Profile Information
+        Get-WmiObject -Class Win32_UserProfile | Select-Object LocalPath, LastUseTime, Loaded
+        # Recent RDP Connections
+        Get-ItemProperty "HKCU:\Software\Microsoft\Terminal Server Client\Default"
+    }
+
+    # System Activity
+    SystemActivity = Get-IRData -Component "System Activity" -Collection {
+        # Running Processes with Additional Details
+        Get-Process | Select-Object ProcessName, Id, Path, Company, CPU, StartTime, 
+        Responding, MainWindowTitle | Where-Object Path -ne $null
+        # Services
+        Get-Service | Where-Object { $_.Status -eq 'Running' }
+        # Scheduled Tasks
+        Get-ScheduledTask | Where-Object { $_.State -ne 'Disabled' }
+    }
+
+    # File System Analysis
+    FileSystem = Get-IRData -Component "File System" -Collection {
+        # Recently Modified Files
+        Get-ChildItem -Path C:\ -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -gt (Get-Date).AddDays(-7) } |
+        Select-Object FullName, Length, LastWriteTime, CreationTime
+        # Alternate Data Streams
+        Get-Item C:\* -Stream * | Where-Object Stream -ne ':$Data'
+    }
+
+    # Event Logs
+    EventLogs = Get-IRData -Component "Event Logs" -Collection {
+        # Security Events
+        Get-WinEvent -FilterHashtable @{
+            LogName='Security'
+            StartTime=(Get-Date).AddDays(-1)
+        } -ErrorAction SilentlyContinue | Select-Object TimeCreated, Id, Message
+        # System Events
+        Get-WinEvent -FilterHashtable @{
+            LogName='System'
+            Level=2,3
+            StartTime=(Get-Date).AddDays(-1)
+        } -ErrorAction SilentlyContinue
+    }
+
+    # Persistence Mechanisms
+    PersistenceMechanisms = Get-IRData -Component "Persistence Mechanisms" -Collection {
+        # Startup Items
+        Get-WmiObject -Class Win32_StartupCommand
+        # Run Keys
+        Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'
+        Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
+        # Services Auto-Start
+        Get-WmiObject -Class Win32_Service | Where-Object { $_.StartMode -eq 'Auto' }
+    }
+}
+
+# Export collected data
+foreach ($key in $systemState.Keys) {
+    $outputFile = Join-Path -Path $outputDir -ChildPath "IR_${key}_${timestamp}.json"
+    try {
+        $systemState[$key] | ConvertTo-Json -Depth 10 | Out-File -FilePath $outputFile
+        Write-Host "[+] Exported $key data to $outputFile"
+    }
+    catch {
+        Write-Host "[-] Error exporting $key data: $_" -ForegroundColor Red
+    }
+}
+
+# Create HTML report
+$htmlReport = @"
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Incident Response Report - $computerName</title>
+    <style>
+        body { font-family: Arial, sans-serif; }
+        .section { margin: 20px; padding: 10px; border: 1px solid #ccc; }
+        .error { color: red; }
+        .success { color: green; }
+    </style>
+</head>
+<body>
+    <h1>Incident Response Collection Report</h1>
+    <div class="section">
+        <h2>Collection Information</h2>
+        <p>Computer Name: $computerName</p>
+        <p>Collection Time: $timestamp</p>
+        <p>Collector: $collectorName</p>
+    </div>
+"@
+
+foreach ($key in $systemState.Keys) {
+    $htmlReport += @"
+    <div class="section">
+        <h2>$key</h2>
+        <pre>$($systemState[$key] | ConvertTo-Html -Fragment)</pre>
+    </div>
+"@
+}
+
+$htmlReport += "</body></html>"
+$htmlReport | Out-File -FilePath (Join-Path -Path $outputDir -ChildPath "IR_Report_${timestamp}.html")
+
+# Create a ZIP archive of all collected data
+$zipPath = "${outputDir}_${timestamp}.zip"
+Compress-Archive -Path $outputDir -DestinationPath $zipPath -Force
+
+Write-Host "[+] Collection completed. Files saved to: $zipPath"
+Stop-Transcript
+
+# Calculate and save file hashes for integrity
+Get-ChildItem -Path $outputDir -Recurse -File | 
+    Get-FileHash -Algorithm SHA256 | 
+    Export-Csv -Path (Join-Path -Path $outputDir -ChildPath "FileHashes.csv")
