@@ -46,18 +46,22 @@ $systemState = @{
 
     # Network Configuration
     NetworkConfiguration = Get-IRData -Component "Network Configuration" -Collection {
-        Get-NetIPConfiguration -Detailed | Select-Object *
-        Get-NetTCPConnection | Where-Object { $_.State -eq 'Established' }
+        Get-NetIPConfiguration -Detailed | Select-Object InterfaceAlias, IPv4Address, IPv6Address, DNSServer
+        Get-NetTCPConnection | Where-Object { $_.State -eq 'Established' } | 
+        Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, State, OwningProcess
     }
 
     # Security Configuration
     SecurityConfiguration = Get-IRData -Component "Security Configuration" -Collection {
         # Security Policy
-        secedit /export /cfg "$outputDir\secpol.cfg"
+        $secpolFile = Join-Path -Path $outputDir -ChildPath "secpol.cfg"
+        secedit /export /cfg $secpolFile
         # Firewall Rules
-        Get-NetFirewallRule | Where-Object { $_.Enabled -eq 'True' }
+        Get-NetFirewallRule | Where-Object { $_.Enabled -eq 'True' } | 
+        Select-Object Name, DisplayName, Description, Direction, Action, Profile
         # Antivirus Status
-        Get-WmiObject -Namespace root\SecurityCenter2 -Class AntiVirusProduct
+        Get-WmiObject -Namespace root\SecurityCenter2 -Class AntiVirusProduct | 
+        Select-Object DisplayName, ProductState, InstanceGuid
     }
 
     # User Activity
@@ -67,8 +71,10 @@ $systemState = @{
         Get-LocalGroup | Select-Object Name, Description
         # User Profile Information
         Get-WmiObject -Class Win32_UserProfile | Select-Object LocalPath, LastUseTime, Loaded
-        # Recent RDP Connections
-        Get-ItemProperty "HKCU:\Software\Microsoft\Terminal Server Client\Default"
+        # Recent RDP Connections - Fixed the error here
+        if (Test-Path "HKCU:\Software\Microsoft\Terminal Server Client\Default") {
+            Get-ItemProperty -Path "HKCU:\Software\Microsoft\Terminal Server Client\Default" | Select-Object *
+        }
     }
 
     # System Activity
@@ -77,19 +83,27 @@ $systemState = @{
         Get-Process | Select-Object ProcessName, Id, Path, Company, CPU, StartTime, 
         Responding, MainWindowTitle | Where-Object Path -ne $null
         # Services
-        Get-Service | Where-Object { $_.Status -eq 'Running' }
+        Get-Service | Where-Object { $_.Status -eq 'Running' } | 
+        Select-Object Name, DisplayName, Status, StartType, ServiceName
         # Scheduled Tasks
-        Get-ScheduledTask | Where-Object { $_.State -ne 'Disabled' }
+        Get-ScheduledTask | Where-Object { $_.State -ne 'Disabled' } | 
+        Select-Object TaskName, TaskPath, State, LastRunTime
     }
 
     # File System Analysis
     FileSystem = Get-IRData -Component "File System" -Collection {
-        # Recently Modified Files
-        Get-ChildItem -Path C:\ -Recurse -ErrorAction SilentlyContinue |
-        Where-Object { $_.LastWriteTime -gt (Get-Date).AddDays(-7) } |
-        Select-Object FullName, Length, LastWriteTime, CreationTime
+        # Recently Modified Files (limited scope to avoid performance issues)
+        $paths = @("C:\Users", "C:\Windows\Temp", "C:\Windows\System32\Tasks")
+        foreach ($path in $paths) {
+            if (Test-Path $path) {
+                Get-ChildItem -Path $path -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -gt (Get-Date).AddDays(-7) } |
+                Select-Object FullName, Length, LastWriteTime, CreationTime
+            }
+        }
         # Alternate Data Streams
-        Get-Item C:\* -Stream * | Where-Object Stream -ne ':$Data'
+        Get-Item C:\Windows\System32\* -Stream * -ErrorAction SilentlyContinue | 
+        Where-Object { $_.Stream -ne '' -and $_.Stream -ne ':$DATA' }
     }
 
     # Event Logs
@@ -97,25 +111,39 @@ $systemState = @{
         # Security Events
         Get-WinEvent -FilterHashtable @{
             LogName='Security'
+            Id=4624,4625,4720,4740,1102
             StartTime=(Get-Date).AddDays(-1)
-        } -ErrorAction SilentlyContinue | Select-Object TimeCreated, Id, Message
+        } -MaxEvents 1000 -ErrorAction SilentlyContinue | 
+        Select-Object TimeCreated, Id, Message
         # System Events
         Get-WinEvent -FilterHashtable @{
             LogName='System'
-            Level=2,3
+            Level=1,2,3
             StartTime=(Get-Date).AddDays(-1)
-        } -ErrorAction SilentlyContinue
+        } -MaxEvents 1000 -ErrorAction SilentlyContinue | 
+        Select-Object TimeCreated, Id, LevelDisplayName, Message
     }
 
     # Persistence Mechanisms
     PersistenceMechanisms = Get-IRData -Component "Persistence Mechanisms" -Collection {
         # Startup Items
-        Get-WmiObject -Class Win32_StartupCommand
+        Get-WmiObject -Class Win32_StartupCommand | 
+        Select-Object Command, Location, User, Name
         # Run Keys
-        Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'
-        Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
+        $runKeys = @(
+            "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run",
+            "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce",
+            "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+            "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
+        )
+        foreach ($key in $runKeys) {
+            if (Test-Path $key) {
+                Get-ItemProperty -Path $key | Select-Object PSPath, PSChildName, *
+            }
+        }
         # Services Auto-Start
-        Get-WmiObject -Class Win32_Service | Where-Object { $_.StartMode -eq 'Auto' }
+        Get-WmiObject -Class Win32_Service | Where-Object { $_.StartMode -eq 'Auto' } | 
+        Select-Object Name, DisplayName, StartMode, PathName, StartName
     }
 }
 
@@ -158,7 +186,7 @@ foreach ($key in $systemState.Keys) {
     $htmlReport += @"
     <div class="section">
         <h2>$key</h2>
-        <pre>$($systemState[$key] | ConvertTo-Html -Fragment)</pre>
+        <pre>$(ConvertTo-Html -InputObject $systemState[$key] -Fragment)</pre>
     </div>
 "@
 }
