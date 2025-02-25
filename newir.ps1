@@ -30,157 +30,110 @@ function Get-IRData {
         return $null
     }
 }
+```
 
-# Get computer system information
-$computerSystemInfo = Get-IRData -Component "Computer System" -Collection {
-    Get-WmiObject -Class Win32_ComputerSystem | 
-    Select-Object Manufacturer, Model, TotalPhysicalMemory, NumberOfLogicalProcessors, Domain, Name
-}
+The line 29 appears to be in the function definition area. Let's try a different approach with a much more simplified script that avoids any potentially problematic syntax:
 
-# Get operating system information
-$operatingSystemInfo = Get-IRData -Component "Operating System" -Collection {
-    Get-WmiObject -Class Win32_OperatingSystem | 
-    Select-Object Caption, Version, BuildNumber, OSArchitecture, InstallDate, LastBootUpTime, LocalDateTime, RegisteredUser
-}
+```powershell
+# Incident Response Data Collection Script
+# Set timestamp format for file naming
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$computerName = $env:COMPUTERNAME
 
-# Get local users information
-$localUsersInfo = Get-IRData -Component "Local Users" -Collection {
-    Get-LocalUser | Select-Object Name, Enabled, LastLogon, PasswordLastSet, PasswordRequired, AccountExpires
-}
+# Create output directory
+$outputDir = "IR_Collection_$computerName`_$timestamp"
+New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 
-# Get local administrators
-$localAdminsInfo = Get-IRData -Component "Local Administrators" -Collection {
-    $admins = net localgroup Administrators
-    $admins | Select-Object -Skip 4 | Select-Object -SkipLast 1
-}
+# Start logging
+$logFile = "$outputDir\IR_Collection_Log.txt"
+"[$(Get-Date)] Starting incident response collection on $computerName" | Out-File -FilePath $logFile
 
-# Get network configuration
-$networkInfo = Get-IRData -Component "Network Configuration" -Collection {
-    Get-NetAdapter | Select-Object Name, InterfaceDescription, Status, MacAddress, LinkSpeed
-    Get-NetIPAddress | Select-Object InterfaceAlias, IPAddress, AddressFamily, PrefixLength
-    Get-NetRoute | Select-Object DestinationPrefix, NextHop, RouteMetric, InterfaceAlias
-    Get-DnsClientServerAddress | Select-Object InterfaceAlias, ServerAddresses
-}
-
-# Get active network connections
-$networkConnectionsInfo = Get-IRData -Component "Network Connections" -Collection {
-    Get-NetTCPConnection | Where-Object State -eq 'Established' | 
-    Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, State, OwningProcess
-}
-
-# Get running processes
-$processInfo = Get-IRData -Component "Processes" -Collection {
-    Get-Process | Select-Object Name, Id, Path, Company, ProductVersion, StartTime, 
-    CPU, WorkingSet, HandleCount, Responding | Sort-Object -Property WorkingSet -Descending
-}
-
-# Get services
-$servicesInfo = Get-IRData -Component "Services" -Collection {
-    Get-Service | Select-Object Name, DisplayName, Status, StartType, 
-    @{Name="Account"; Expression={(Get-WmiObject Win32_Service | Where-Object {$_.Name -eq $_.Name}).StartName}}
-}
-
-# Get installed software
-$installedSoftwareInfo = Get-IRData -Component "Installed Software" -Collection {
-    Get-WmiObject -Class Win32_Product | Select-Object Name, Vendor, Version, InstallDate
-}
-
-# Get security event logs
-$securityEventsInfo = Get-IRData -Component "Security Events" -Collection {
-    Get-WinEvent -FilterHashtable @{
-        LogName='Security'
-        ID=4624,4625,4720,4722,4724,4728,4732,4756,4738,4648
-        StartTime=(Get-Date).AddDays(-1)
-    } -MaxEvents 500 -ErrorAction SilentlyContinue | 
-    Select-Object TimeCreated, Id, Message
-}
-
-# Get startup items
-$startupItemsInfo = Get-IRData -Component "Startup Items" -Collection {
-    Get-WmiObject -Class Win32_StartupCommand | 
-    Select-Object Command, User, Location
-    
-    $runKeys = @(
-        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run",
-        "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce",
-        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
-        "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
+# Create a function to run commands and capture output to file
+function Run-Command {
+    param (
+        [string]$Name,
+        [string]$Command
     )
     
-    foreach ($key in $runKeys) {
-        if (Test-Path $key) {
-            Get-ItemProperty -Path $key
-        }
-    }
-}
-
-# Get scheduled tasks
-$scheduledTasksInfo = Get-IRData -Component "Scheduled Tasks" -Collection {
-    Get-ScheduledTask | Where-Object State -ne 'Disabled' | 
-    Select-Object TaskName, TaskPath, State, LastRunTime, NextRunTime
-}
-
-# Get firewall rules
-$firewallRulesInfo = Get-IRData -Component "Firewall Rules" -Collection {
-    Get-NetFirewallRule | Where-Object Enabled -eq 'True' | 
-    Select-Object Name, DisplayName, Enabled, Direction, Action
-}
-
-# Export data to separate files
-$outputFiles = @{
-    "ComputerSystem" = $computerSystemInfo
-    "OperatingSystem" = $operatingSystemInfo
-    "LocalUsers" = $localUsersInfo
-    "LocalAdmins" = $localAdminsInfo
-    "NetworkConfiguration" = $networkInfo
-    "NetworkConnections" = $networkConnectionsInfo
-    "Processes" = $processInfo
-    "Services" = $servicesInfo
-    "InstalledSoftware" = $installedSoftwareInfo
-    "SecurityEvents" = $securityEventsInfo
-    "StartupItems" = $startupItemsInfo
-    "ScheduledTasks" = $scheduledTasksInfo
-    "FirewallRules" = $firewallRulesInfo
-}
-
-foreach ($key in $outputFiles.Keys) {
-    $outputFile = Join-Path -Path $outputDir -ChildPath "IR_${key}_${timestamp}.txt"
+    "[$(Get-Date)] Collecting $Name" | Out-File -FilePath $logFile -Append
+    $outputFile = "$outputDir\IR_$Name.txt"
+    
     try {
-        $outputFiles[$key] | Format-List | Out-File -FilePath $outputFile
-        Write-Host "[+] Exported $key data to $outputFile"
+        # Run command and redirect output to file
+        "INCIDENT RESPONSE DATA: $Name" | Out-File -FilePath $outputFile
+        "Collection Time: $(Get-Date)" | Out-File -FilePath $outputFile -Append
+        "Command: $Command" | Out-File -FilePath $outputFile -Append
+        "-----------------------------------------" | Out-File -FilePath $outputFile -Append
+        
+        # Execute command and capture output
+        Invoke-Expression $Command | Out-File -FilePath $outputFile -Append
+        
+        "[$(Get-Date)] Successfully collected $Name" | Out-File -FilePath $logFile -Append
     }
     catch {
-        Write-Host "[-] Error exporting $key data: $_" -ForegroundColor Red
+        "[$(Get-Date)] Error collecting $Name : $_" | Out-File -FilePath $logFile -Append
     }
 }
 
+# Collect system information
+Run-Command -Name "ComputerSystem" -Command "Get-WmiObject -Class Win32_ComputerSystem | Format-List *"
+Run-Command -Name "OperatingSystem" -Command "Get-WmiObject -Class Win32_OperatingSystem | Format-List *"
+Run-Command -Name "BiOS" -Command "Get-WmiObject -Class Win32_BIOS | Format-List *"
+
+# Collect user information
+Run-Command -Name "LocalUsers" -Command "Get-LocalUser | Format-List *"
+Run-Command -Name "LocalGroups" -Command "Get-LocalGroup | Format-List *"
+Run-Command -Name "AdminGroup" -Command "net localgroup Administrators"
+
+# Collect network information
+Run-Command -Name "IPConfig" -Command "ipconfig /all"
+Run-Command -Name "NetworkAdapters" -Command "Get-NetAdapter | Format-List *"
+Run-Command -Name "ActiveConnections" -Command "netstat -anob"
+Run-Command -Name "RoutingTable" -Command "route print"
+Run-Command -Name "ARPCache" -Command "arp -a"
+
+# Collect process information
+Run-Command -Name "RunningProcesses" -Command "Get-Process | Sort-Object -Property WorkingSet -Descending | Format-Table Name, Id, Path, Company, CPU, WorkingSet, StartTime -AutoSize"
+Run-Command -Name "ProcessConnections" -Command "Get-NetTCPConnection | Where-Object State -eq 'Established' | Format-Table LocalAddress, LocalPort, RemoteAddress, RemotePort, State, OwningProcess -AutoSize"
+Run-Command -Name "TaskList" -Command "tasklist /v"
+
+# Collect service information
+Run-Command -Name "RunningServices" -Command "Get-Service | Where-Object Status -eq 'Running' | Format-Table Name, DisplayName, Status, StartType -AutoSize"
+Run-Command -Name "ServiceDetails" -Command "Get-WmiObject -Class Win32_Service | Format-List Name, DisplayName, State, StartMode, PathName, StartName"
+
+# Collect startup and persistence information
+Run-Command -Name "StartupCommands" -Command "Get-WmiObject -Class Win32_StartupCommand | Format-List *"
+Run-Command -Name "ScheduledTasks" -Command "Get-ScheduledTask | Where-Object State -ne 'Disabled' | Format-List *"
+Run-Command -Name "RunKeys" -Command "Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' | Format-List *"
+
+# Collect security information
+Run-Command -Name "SecurityEvents" -Command "Get-EventLog -LogName Security -Newest 1000 | Format-Table TimeGenerated, EntryType, EventID, Message -AutoSize"
+Run-Command -Name "FirewallRules" -Command "Get-NetFirewallRule | Where-Object Enabled -eq 'True' | Format-Table Name, DisplayName, Direction, Action, Profile -AutoSize"
+Run-Command -Name "AntivirusProduct" -Command "Get-WmiObject -Namespace root\SecurityCenter2 -Class AntiVirusProduct | Format-List *"
+
+# Collect system file information
+Run-Command -Name "RecentlyModifiedExes" -Command "Get-ChildItem -Path C:\Windows\System32 -Include *.exe -Recurse -ErrorAction SilentlyContinue | Where-Object LastWriteTime -gt (Get-Date).AddDays(-30) | Sort-Object LastWriteTime -Descending | Format-Table FullName, LastWriteTime, Length -AutoSize"
+
 # Create a summary file
-$summaryFile = Join-Path -Path $outputDir -ChildPath "IR_Summary_${timestamp}.txt"
-$summary = @"
+$summaryFile = "$outputDir\IR_Summary.txt"
+@"
 ===========================================================================
 INCIDENT RESPONSE DATA COLLECTION SUMMARY
 ===========================================================================
 Computer Name: $computerName
 Collection Time: $(Get-Date)
-Collected By: $collectorName
 ===========================================================================
 FILES COLLECTED:
-"@
+"@ | Out-File -FilePath $summaryFile
 
-foreach ($key in $outputFiles.Keys) {
-    $summary += "`n- IR_${key}_${timestamp}.txt"
+Get-ChildItem -Path $outputDir -Filter "IR_*.txt" | ForEach-Object {
+    "- $($_.Name)" | Out-File -FilePath $summaryFile -Append
 }
 
-$summary | Out-File -FilePath $summaryFile
+# Create a ZIP archive
+$zipFile = "$outputDir.zip"
+"[$(Get-Date)] Creating zip archive $zipFile" | Out-File -FilePath $logFile -Append
+Compress-Archive -Path $outputDir -DestinationPath $zipFile -Force
 
-# Create a ZIP archive of all collected data
-$zipPath = "${outputDir}.zip"
-Compress-Archive -Path $outputDir -DestinationPath $zipPath -Force
-
-Write-Host "[+] Collection completed. Files saved to: $zipPath"
-Stop-Transcript
-
-# Calculate and save file hashes for integrity
-Get-ChildItem -Path $outputDir -Recurse -File | 
-    Get-FileHash -Algorithm SHA256 | 
-    Export-Csv -Path (Join-Path -Path $outputDir -ChildPath "FileHashes.csv")
+"[$(Get-Date)] Collection completed. Files saved to: $zipFile" | Out-File -FilePath $logFile -Append
+"[$(Get-Date)] Collection completed. Files saved to: $zipFile"
