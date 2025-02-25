@@ -26,7 +26,7 @@ function Get-IRData {
         & $Collection
     }
     catch {
-        Write-Host "[-] Error collecting $Component: $_" -ForegroundColor Red
+        Write-Host "[-] Error collecting $Component $_" -ForegroundColor Red
         return $null
     }
 }
